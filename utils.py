@@ -5,9 +5,10 @@ import cv2
 import numpy as np
 import matplotlib.pyplot as plt
 
-from keras.preprocessing.image import Iterator
-from keras.utils.np_utils import to_categorical
+from tensorflow.keras.preprocessing.image import Iterator
+from tensorflow.keras.utils import to_categorical
 import keras.backend as K
+import tensorflow as tf
 
 
 def angle_difference(x, y):
@@ -23,8 +24,8 @@ def angle_error(y_true, y_pred):
     and the predicted angles. Each angle is represented
     as a binary vector.
     """
-    diff = angle_difference(K.argmax(y_true), K.argmax(y_pred))
-    return K.mean(K.cast(K.abs(diff), K.floatx()))
+    diff = angle_difference(tf.argmax(y_true, axis=-1), tf.argmax(y_pred, axis=-1))
+    return tf.reduce_mean(tf.cast(diff, tf.float32))
 
 
 def angle_error_regression(y_true, y_pred):
