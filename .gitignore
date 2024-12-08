@@ -94,3 +94,9 @@ ENV/
 data/street_view
 logs/
 *.hdf5
+
+# macOS shits
+.DS_Store
+
+# generated models
+models/
