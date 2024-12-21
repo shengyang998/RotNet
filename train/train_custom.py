@@ -6,12 +6,19 @@ from glob import glob
 import cv2
 import numpy as np
 
-from keras.callbacks import ModelCheckpoint, EarlyStopping, TensorBoard, ReduceLROnPlateau
-from keras.applications.resnet50 import ResNet50
-from keras.applications.imagenet_utils import preprocess_input
-from keras.models import Model
-from keras.layers import Dense, Flatten
-from keras.optimizers import SGD
+from tensorflow.keras.callbacks import ModelCheckpoint, EarlyStopping, TensorBoard, ReduceLROnPlateau
+from tensorflow.keras.applications.resnet50 import ResNet50
+from tensorflow.keras.applications.imagenet_utils import preprocess_input
+from tensorflow.keras.models import Model
+from tensorflow.keras.layers import Dense, Flatten
+from tensorflow.keras.optimizers import SGD
+
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
+import threading
+
+# 添加一个线程锁来保护打印操作
+print_lock = threading.Lock()
 
 # 添加项目根目录到Python路径
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -21,7 +28,8 @@ def preprocess_image(image_path, max_width=4000, max_height=3000):
     """按比例缩放图像，确保不超过最大尺寸"""
     img = cv2.imread(image_path)
     if img is None:
-        print(f"警告: 无法读取图像 {image_path}")
+        with print_lock:
+            print(f"警告: 无法读取图像 {image_path}")
         return None
         
     height, width = img.shape[:2]
@@ -29,7 +37,7 @@ def preprocess_image(image_path, max_width=4000, max_height=3000):
     # 计算缩放比例
     scale_w = max_width / width if width > max_width else 1
     scale_h = max_height / height if height > max_height else 1
-    scale = min(scale_w, scale_h)  # 选择较小的缩放比例以确保两个维度都不超过限制
+    scale = min(scale_w, scale_h)
     
     # 如果图像小于最大尺寸，则不进行缩放
     if scale >= 1:
@@ -47,7 +55,7 @@ def preprocess_image(image_path, max_width=4000, max_height=3000):
     filename = os.path.basename(image_path)
     new_path = os.path.join(processed_dir, f'processed_{filename}')
     
-    # 如果处理后的文件已存在，直接返��路径
+    # 如果处理后的文件已存在，直接返回路径
     if os.path.exists(new_path):
         return new_path
         
@@ -56,7 +64,8 @@ def preprocess_image(image_path, max_width=4000, max_height=3000):
     
     # 保存处理后的图像
     cv2.imwrite(new_path, resized)
-    print(f"已处理图像 {filename}: {width}x{height} -> {new_width}x{new_height}")
+    with print_lock:
+        print(f"已处理图像 {filename}: {width}x{height} -> {new_width}x{new_height}")
     
     return new_path
 
@@ -66,14 +75,21 @@ def get_custom_filenames(data_path, valid_extensions=('.jpg', '.jpeg', '.png')):
     for ext in valid_extensions:
         all_files.extend(glob(os.path.join(data_path, f'*{ext}')))
     
-    # 预处理所有图像
-    processed_files = []
-    for file_path in all_files:
-        processed_path = preprocess_image(file_path)
-        if processed_path:
-            processed_files.append(processed_path)
+    print(f"找到 {len(all_files)} 个图像文件")
     
-    # 随机分割训练集和测试集（80%训练，20%测试）
+    # 使用线程池处理图像
+    processed_files = []
+    with ThreadPoolExecutor(max_workers=min(32, os.cpu_count() * 2)) as executor:
+        # 使用tqdm显示进度条
+        from tqdm import tqdm
+        futures = list(tqdm(executor.map(preprocess_image, all_files), 
+                          total=len(all_files),
+                          desc="预处理图像"))
+        
+        # 收集处理结果
+        processed_files = [f for f in futures if f is not None]
+    
+    # 随机分割训练集和测试集
     import random
     random.shuffle(processed_files)
     split_idx = int(len(processed_files) * 0.8)
@@ -116,7 +132,7 @@ model.compile(loss='categorical_crossentropy',
 batch_size = 64
 nb_epoch = 50
 
-# 创建模型保存目录
+# 创���模型保存目录
 output_folder = 'models'
 if not os.path.exists(output_folder):
     os.makedirs(output_folder)
