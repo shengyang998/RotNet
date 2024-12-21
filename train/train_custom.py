@@ -5,6 +5,7 @@ import sys
 from glob import glob
 import cv2
 import numpy as np
+import shutil
 
 from tensorflow.keras.callbacks import ModelCheckpoint, EarlyStopping, TensorBoard, ReduceLROnPlateau
 from tensorflow.keras.applications.resnet50 import ResNet50
@@ -26,6 +27,15 @@ from utils import angle_error, RotNetDataGenerator
 
 def preprocess_image(image_path, max_width=4000, max_height=3000):
     """按比例缩放图像，确保不超过最大尺寸"""
+    # 检查是否已经处理过
+    processed_dir = os.path.join(os.path.dirname(image_path), 'processed')
+    filename = os.path.basename(image_path)
+    new_path = os.path.join(processed_dir, f'processed_{filename}')
+    
+    # 如果处理后的文件已存在，直接返回路径
+    if os.path.exists(new_path):
+        return new_path
+    
     img = cv2.imread(image_path)
     if img is None:
         with print_lock:
@@ -39,26 +49,19 @@ def preprocess_image(image_path, max_width=4000, max_height=3000):
     scale_h = max_height / height if height > max_height else 1
     scale = min(scale_w, scale_h)
     
-    # 如果图像小于最大尺寸，则不进行缩放
+    # 如果图像小于最大尺寸，复制到processed目录
     if scale >= 1:
-        return image_path
+        os.makedirs(processed_dir, exist_ok=True)
+        shutil.copy2(image_path, new_path)
+        return new_path
         
     # 计算新的尺寸
     new_width = int(width * scale)
     new_height = int(height * scale)
     
     # 创建处理后的图像目录
-    processed_dir = os.path.join(os.path.dirname(image_path), 'processed')
     os.makedirs(processed_dir, exist_ok=True)
     
-    # 生成新的文件名
-    filename = os.path.basename(image_path)
-    new_path = os.path.join(processed_dir, f'processed_{filename}')
-    
-    # 如果处理后的文件已存在，直接返回路径
-    if os.path.exists(new_path):
-        return new_path
-        
     # 调整图像大小
     resized = cv2.resize(img, (new_width, new_height), interpolation=cv2.INTER_AREA)
     
@@ -72,22 +75,41 @@ def preprocess_image(image_path, max_width=4000, max_height=3000):
 def get_custom_filenames(data_path, valid_extensions=('.jpg', '.jpeg', '.png')):
     """获取指定目录下的所有图片文件并进行预处理"""
     all_files = []
+    processed_files = []
+    files_to_process = []
+    
+    # 获取所有图片文件
     for ext in valid_extensions:
         all_files.extend(glob(os.path.join(data_path, f'*{ext}')))
     
-    print(f"找到 {len(all_files)} 个图像文件")
-    
-    # 使用线程池处理图像
-    processed_files = []
-    with ThreadPoolExecutor(max_workers=min(32, os.cpu_count() * 2)) as executor:
-        # 使用tqdm显示进度条
-        from tqdm import tqdm
-        futures = list(tqdm(executor.map(preprocess_image, all_files), 
-                          total=len(all_files),
-                          desc="预处理图像"))
+    # 检查每个文件是否已经处理过
+    for file_path in all_files:
+        processed_dir = os.path.join(os.path.dirname(file_path), 'processed')
+        filename = os.path.basename(file_path)
+        processed_path = os.path.join(processed_dir, f'processed_{filename}')
         
-        # 收集处理结果
-        processed_files = [f for f in futures if f is not None]
+        # 如果已经有处理过的文件，直接添加到结果列表
+        if os.path.exists(processed_path):
+            processed_files.append(processed_path)
+        else:
+            files_to_process.append(file_path)
+    
+    print(f"找到 {len(all_files)} 个图像文件")
+    print(f"其中 {len(processed_files)} 个已处理")
+    print(f"{len(files_to_process)} 个需要处理")
+    
+    # 如果有需要处理的文件，使用线程池处理
+    if files_to_process:
+        with ThreadPoolExecutor(max_workers=min(32, os.cpu_count() * 2)) as executor:
+            # 使用tqdm显示进度条
+            from tqdm import tqdm
+            futures = list(tqdm(executor.map(preprocess_image, files_to_process), 
+                              total=len(files_to_process),
+                              desc="预处理图像"))
+            
+            # 收集新处理的结果
+            new_processed_files = [f for f in futures if f is not None]
+            processed_files.extend(new_processed_files)
     
     # 随机分割训练集和测试集
     import random
@@ -132,7 +154,7 @@ model.compile(loss='categorical_crossentropy',
 batch_size = 64
 nb_epoch = 50
 
-# 创���模型保存目录
+# 创建模型保存目录
 output_folder = 'models'
 if not os.path.exists(output_folder):
     os.makedirs(output_folder)
