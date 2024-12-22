@@ -20,12 +20,21 @@ def angle_difference(x, y):
 
 def angle_error(y_true, y_pred):
     """
-    Calculate the mean diference between the true angles
-    and the predicted angles. Each angle is represented
-    as a binary vector.
+    Calculate the mean angle error with 0.01 degree precision
     """
-    diff = angle_difference(tf.argmax(y_true, axis=-1), tf.argmax(y_pred, axis=-1))
-    return tf.reduce_mean(tf.cast(diff, tf.float32))
+    # Convert from one-hot to angles
+    y_true_cls = tf.argmax(y_true, axis=1)
+    y_pred_cls = tf.argmax(y_pred, axis=1)
+    
+    # Convert to actual angles (multiply by precision 0.01)
+    y_true_angle = tf.cast(y_true_cls, dtype=tf.float32) * 0.01
+    y_pred_angle = tf.cast(y_pred_cls, dtype=tf.float32) * 0.01
+    
+    # Calculate absolute difference
+    diff = tf.abs(y_true_angle - y_pred_angle)
+    
+    # Handle wrap-around cases (e.g., 359.99 vs 0.00)
+    return tf.reduce_mean(tf.minimum(diff, 360.0 - diff))
 
 
 def angle_error_regression(y_true, y_pred):
@@ -231,8 +240,8 @@ class RotNetDataGenerator(Iterator):
 
     def __init__(self, input, input_shape=None, color_mode='rgb', batch_size=64,
                  one_hot=True, preprocess_func=None, rotate=True, crop_center=False,
-                 crop_largest_rect=False, shuffle=False, seed=None):
-
+                 crop_largest_rect=False, shuffle=False, seed=None, **kwargs):
+        
         self.images = None
         self.filenames = None
         self.input_shape = input_shape
@@ -245,24 +254,37 @@ class RotNetDataGenerator(Iterator):
         self.crop_largest_rect = crop_largest_rect
         self.shuffle = shuffle
 
-        if self.color_mode not in {'rgb', 'grayscale'}:
-            raise ValueError('Invalid color mode:', self.color_mode,
-                             '; expected "rgb" or "grayscale".')
-
-        # check whether the input is a NumPy array or a list of paths
         if isinstance(input, (np.ndarray)):
             self.images = input
             N = self.images.shape[0]
             if not self.input_shape:
                 self.input_shape = self.images.shape[1:]
-                # add dimension if the images are greyscale
                 if len(self.input_shape) == 2:
                     self.input_shape = self.input_shape + (1,)
         else:
             self.filenames = input
             N = len(self.filenames)
 
-        super(RotNetDataGenerator, self).__init__(N, batch_size, shuffle, seed)
+        # 更新初始化方式
+        self.n = N
+        self.total = N
+        self.base = 0
+        
+        # 正确调用父类初始化
+        kwargs.update({
+            'n': self.n,
+            'batch_size': batch_size,
+            'shuffle': shuffle,
+            'seed': seed
+        })
+        super(RotNetDataGenerator, self).__init__(**kwargs)
+
+    def __len__(self):
+        return (self.n + self.batch_size - 1) // self.batch_size
+
+    def on_epoch_end(self):
+        if self.shuffle:
+            np.random.shuffle(self.filenames)
 
     def _get_batches_of_transformed_samples(self, index_array):
         # create array to hold the images
@@ -281,8 +303,8 @@ class RotNetDataGenerator(Iterator):
                     image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
 
             if self.rotate:
-                # get a random angle
-                rotation_angle = np.random.randint(360)
+                # get a random angle with 0.01 degree precision
+                rotation_angle = np.random.randint(36000) * 0.01
             else:
                 rotation_angle = 0
 
@@ -301,13 +323,14 @@ class RotNetDataGenerator(Iterator):
 
             # store the image and label in their corresponding batches
             batch_x[i] = rotated_image
-            batch_y[i] = rotation_angle
+            # convert angle to class index (multiply by 100 to get integer class)
+            batch_y[i] = int(rotation_angle * 100)
 
         if self.one_hot:
             # convert the numerical labels to binary labels
-            batch_y = to_categorical(batch_y, 360)
+            batch_y = to_categorical(batch_y, 36000)
         else:
-            batch_y /= 360
+            batch_y /= 36000
 
         # preprocess input images
         if self.preprocess_func:
@@ -353,7 +376,8 @@ def display_examples(model, input, num_images=5, size=None, crop_center=False,
     x = []
     y = []
     for image in images:
-        rotation_angle = np.random.randint(360)
+        # Generate random angle with 0.01 degree precision
+        rotation_angle = np.random.randint(36000) * 0.01
         rotated_image = generate_rotated_image(
             image,
             rotation_angle,
@@ -362,7 +386,7 @@ def display_examples(model, input, num_images=5, size=None, crop_center=False,
             crop_largest_rect=crop_largest_rect
         )
         x.append(rotated_image)
-        y.append(rotation_angle)
+        y.append(int(rotation_angle * 100))  # convert to class index
 
     x = np.asarray(x, dtype='float32')
     y = np.asarray(y, dtype='float32')
@@ -370,7 +394,7 @@ def display_examples(model, input, num_images=5, size=None, crop_center=False,
     if x.ndim == 3:
         x = np.expand_dims(x, axis=3)
 
-    y = to_categorical(y, 360)
+    y = to_categorical(y, 36000)
 
     x_rot = np.copy(x)
 

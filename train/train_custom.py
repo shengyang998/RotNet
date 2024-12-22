@@ -18,12 +18,18 @@ from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 import threading
 
+from tensorflow.keras import mixed_precision
+policy = mixed_precision.Policy('mixed_float16')
+mixed_precision.set_global_policy(policy)
+
 # 添加一个线程锁来保护打印操作
 print_lock = threading.Lock()
 
 # 添加项目根目录到Python路径
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils import angle_error, RotNetDataGenerator
+
+import tensorflow as tf
 
 def preprocess_image(image_path, max_width=4000, max_height=3000):
     """按比例缩放图像，确保不超过最大尺寸"""
@@ -62,102 +68,108 @@ def preprocess_image(image_path, max_width=4000, max_height=3000):
     # 创建处理后的图像目录
     os.makedirs(processed_dir, exist_ok=True)
     
-    # 调整图像大小
+    # 整图像大小
     resized = cv2.resize(img, (new_width, new_height), interpolation=cv2.INTER_AREA)
     
-    # 保存处理后的图像
+    # 保存处理后的像
     cv2.imwrite(new_path, resized)
     with print_lock:
         print(f"已处理图像 {filename}: {width}x{height} -> {new_width}x{new_height}")
     
     return new_path
 
-def get_custom_filenames(data_path, valid_extensions=('.jpg', '.jpeg', '.png')):
-    """获取指定目录下的所有图片文件并进行预处理"""
-    all_files = []
-    processed_files = []
-    files_to_process = []
-    
-    # 获取所有图片文件
+def get_custom_filenames(data_path, valid_extensions=('.JPG', '.jpg', '.jpeg', '.png')):
+    """Get and process all images from the data directory"""
+    # First, get all original images
+    original_files = []
     for ext in valid_extensions:
-        all_files.extend(glob(os.path.join(data_path, f'*{ext}')))
+        original_files.extend(glob(os.path.join(data_path, f'*{ext}')))
     
-    # 检查每个文件是否已经处理过
-    for file_path in all_files:
-        processed_dir = os.path.join(os.path.dirname(file_path), 'processed')
-        filename = os.path.basename(file_path)
-        processed_path = os.path.join(processed_dir, f'processed_{filename}')
-        
-        # 如果已经有处理过的文件，直接添加到结果列表
-        if os.path.exists(processed_path):
-            processed_files.append(processed_path)
-        else:
-            files_to_process.append(file_path)
+    if not original_files:
+        raise ValueError(f"No original images found in {data_path}")
     
-    print(f"找到 {len(all_files)} 个图像文件")
-    print(f"其中 {len(processed_files)} 个已处理")
-    print(f"{len(files_to_process)} 个需要处理")
+    print(f"Found {len(original_files)} original images")
     
-    # 如果有需要处理的文件，使用线程池处理
-    if files_to_process:
-        with ThreadPoolExecutor(max_workers=min(32, os.cpu_count() * 2)) as executor:
-            # 使用tqdm显示进度条
-            from tqdm import tqdm
-            futures = list(tqdm(executor.map(preprocess_image, files_to_process), 
-                              total=len(files_to_process),
-                              desc="预处理图像"))
-            
-            # 收集新处理的结果
-            new_processed_files = [f for f in futures if f is not None]
-            processed_files.extend(new_processed_files)
+    # Process all images using ThreadPoolExecutor
+    processed_files = []
+    with ThreadPoolExecutor() as executor:
+        processed_files = list(filter(None, executor.map(preprocess_image, original_files)))
     
-    # 随机分割训练集和测试集
+    if not processed_files:
+        raise ValueError(f"No images were successfully processed")
+    
+    print(f"Successfully processed {len(processed_files)} images")
+    
+    # Randomly split into train and test sets
     import random
     random.shuffle(processed_files)
     split_idx = int(len(processed_files) * 0.8)
     return processed_files[:split_idx], processed_files[split_idx:]
 
-# 设置数据路径并获取训练和测试文件名
-data_path = 'data/custom_images'  # 修改为您的图片目录路径
+# Change the relative path to absolute path
+data_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data', 'custom_images')
+print(f"Looking for images in: {data_path}")
 train_filenames, test_filenames = get_custom_filenames(data_path)
+
+if len(train_filenames) == 0 or len(test_filenames) == 0:
+    raise ValueError(f"No images found in {data_path}. Please ensure the directory contains valid image files.")
 
 print(len(train_filenames), 'train samples')
 print(len(test_filenames), 'test samples')
 
 model_name = 'rotnet_custom_resnet50'
 
-# 模型配置参数
-nb_classes = 36000  # 输出类别数(角度0-359.99, 步长0.01)
-input_shape = (224, 224, 3)  # 输入图像尺寸
+# 修改模型配置参数
+nb_classes = 36000
+input_shape = (224, 224, 3)
 
-# 加载预训练的ResNet50模型作为基础模型
-base_model = ResNet50(weights='imagenet', include_top=False,
-                      input_shape=input_shape)
+# 加载预训练的ResNet50模型，冻结部分层
+base_model = ResNet50(weights='imagenet', 
+                     include_top=False,
+                     input_shape=input_shape,
+                     pooling='avg')  # 使用全局平均池化
 
-# 构建分类层
+# 冻结前面的层，只训练后面的层
+for layer in base_model.layers[:-50]:  # 只训练最后50层
+    layer.trainable = False
+
+# 简化分类层结构，添加dropout防止过拟合
 x = base_model.output
-x = Flatten()(x)
-x = Dense(512, activation='relu')(x)
+x = Dense(1024, activation='relu', kernel_regularizer=tf.keras.regularizers.l2(0.01))(x)
+x = tf.keras.layers.Dropout(0.5)(x)
 final_output = Dense(nb_classes, activation='softmax', name='fc36000')(x)
 
 # 创建完整模型
 model = Model(inputs=base_model.input, outputs=final_output)
 
-model.summary()
+# 使用更小的初始学习率和更好的优化器
+optimizer = tf.keras.optimizers.Adam(
+    learning_rate=0.0001,
+    beta_1=0.9,
+    beta_2=0.999,
+    epsilon=1e-07
+)
 
 # 配置模型训练参数
-model.compile(loss='categorical_crossentropy',
-              optimizer=SGD(lr=0.01, momentum=0.9),
-              metrics=[angle_error])
+model.compile(
+    loss='categorical_crossentropy',
+    optimizer=optimizer,
+    metrics=[angle_error]
+)
 
-# 训练超参数
-batch_size = 64
-nb_epoch = 50
+# 减小批量大小以提高泛化能力
+batch_size = 16
+nb_epoch = 100
 
 # 创建模型保存目录
 output_folder = 'models'
 if not os.path.exists(output_folder):
     os.makedirs(output_folder)
+
+# Add this: Create logs directory for TensorBoard
+log_dir = os.path.join('logs', model_name)
+if not os.path.exists(log_dir):
+    os.makedirs(log_dir)
 
 # 配置回调函数
 monitor = 'val_angle_error'
@@ -166,9 +178,35 @@ checkpointer = ModelCheckpoint(
     monitor=monitor,
     save_best_only=True
 )
-reduce_lr = ReduceLROnPlateau(monitor=monitor, patience=3)
-early_stopping = EarlyStopping(monitor=monitor, patience=5)
-tensorboard = TensorBoard()
+reduce_lr = ReduceLROnPlateau(monitor=monitor, patience=3, mode='min')
+early_stopping = EarlyStopping(monitor=monitor, patience=5, mode='min')
+tensorboard = TensorBoard(
+    log_dir=log_dir,
+    histogram_freq=1,
+    write_graph=True,
+    write_images=True,
+    update_freq='batch',
+    profile_batch=0
+)
+
+# Create a custom callback to ensure metrics are logged properly
+class MetricsLogger(tf.keras.callbacks.Callback):
+    def on_epoch_end(self, epoch, logs=None):
+        logs = logs or {}
+        # Ensure angle error is logged with the correct name
+        if 'angle_error' in logs:
+            logs['angle_error'] = float(logs['angle_error'])
+        if 'val_angle_error' in logs:
+            logs['val_angle_error'] = float(logs['val_angle_error'])
+
+# Update the callbacks list to include the MetricsLogger
+callbacks = [
+    checkpointer,
+    reduce_lr,
+    early_stopping,
+    tensorboard,
+    MetricsLogger()
+]
 
 # 开始训练
 model.fit(
@@ -192,6 +230,5 @@ model.fit(
         crop_largest_rect=True
     ),
     validation_steps=len(test_filenames) // batch_size,
-    callbacks=[checkpointer, reduce_lr, early_stopping, tensorboard],
-    workers=10
+    callbacks=callbacks
 ) 
