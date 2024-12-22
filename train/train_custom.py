@@ -191,21 +191,20 @@ def denormalize_angle(normalized_angle):
 def angle_error_normalized(y_true, y_pred):
     """
     Calculate the angle error for normalized angles
-    Input angles are in normalized form [-1, 1]
+    Input angles are in normalized form [0, 1]
     Returns error in degrees
     """
-    # Cast inputs to float32 to ensure consistent types
     y_true = tf.cast(y_true, tf.float32)
     y_pred = tf.cast(y_pred, tf.float32)
     
-    # Convert normalized values back to angles
-    y_true_angle = denormalize_angle(y_true)
-    y_pred_angle = denormalize_angle(y_pred)
+    # Convert [0,1] to degrees [0,360]
+    y_true_angle = y_true * 360.0
+    y_pred_angle = y_pred * 360.0
     
     # Calculate absolute difference
     diff = tf.abs(y_true_angle - y_pred_angle)
     # Handle cases where the difference is greater than 180 degrees
-    return tf.minimum(360 - diff, diff)
+    return tf.minimum(360.0 - diff, diff)
 
 model.compile(
     loss=angle_loss,
