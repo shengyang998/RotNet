@@ -11,12 +11,16 @@ from tensorflow.keras.callbacks import ModelCheckpoint, EarlyStopping, TensorBoa
 from tensorflow.keras.applications.resnet50 import ResNet50
 from tensorflow.keras.applications.imagenet_utils import preprocess_input
 from tensorflow.keras.models import Model
-from tensorflow.keras.layers import Dense, Flatten
-from tensorflow.keras.optimizers import SGD
+from tensorflow.keras.layers import Dense
+from tensorflow.keras.optimizers import Adam
+import tensorflow as tf
 
 from concurrent.futures import ThreadPoolExecutor
-from functools import partial
 import threading
+
+# 添加项目根目录到Python路径
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from utils import angle_error_regression, RotNetDataGenerator
 
 from tensorflow.keras import mixed_precision
 policy = mixed_precision.Policy('mixed_float16')
@@ -117,118 +121,151 @@ if len(train_filenames) == 0 or len(test_filenames) == 0:
 print(len(train_filenames), 'train samples')
 print(len(test_filenames), 'test samples')
 
-model_name = 'rotnet_custom_resnet50'
+model_name = 'rotnet_custom_resnet50_regression'
 
-# 修改模型配置参数
-nb_classes = 36000
+# 修改模型配置参数 - 回归模型只需要预测一个角度值
 input_shape = (224, 224, 3)
 
-# 加载预训练的ResNet50模型，冻结部分层
+# 加载预训练的ResNet50模型
 base_model = ResNet50(weights='imagenet', 
                      include_top=False,
                      input_shape=input_shape,
-                     pooling='avg')  # 使用全局平均池化
+                     pooling='avg')
 
-# 冻结前面的层，只训练后面的层
-for layer in base_model.layers[:-50]:  # 只训练最后50层
+# 冻结部分层
+for layer in base_model.layers[:-50]:
     layer.trainable = False
 
-# 简化分类层结构，添加dropout防止过拟合
+# 简化回归模型结构
 x = base_model.output
-x = Dense(1024, activation='relu', kernel_regularizer=tf.keras.regularizers.l2(0.01))(x)
+x = Dense(512, activation='relu', kernel_regularizer=tf.keras.regularizers.l2(0.01))(x)
 x = tf.keras.layers.Dropout(0.5)(x)
-final_output = Dense(nb_classes, activation='softmax', name='fc36000')(x)
+# 最后一层使用线性激活函数，直接输出角度值
+final_output = Dense(1, activation='linear', name='angle_output')(x)
 
 # 创建完整模型
 model = Model(inputs=base_model.input, outputs=final_output)
 
-# 使用更小的初始学习率和更好的优化器
-optimizer = tf.keras.optimizers.Adam(
-    learning_rate=0.0001,
-    beta_1=0.9,
-    beta_2=0.999,
-    epsilon=1e-07
-)
+# 使用Adam优化器
+optimizer = Adam(learning_rate=0.0001)
 
-# 配置模型训练参数
+# 配置模型训练参数 - 使用MSE或自定义损失函数
+def angle_loss(y_true, y_pred):
+    """Custom loss function for angle regression"""
+    # Convert angles to radians
+    diff = tf.abs(y_true - y_pred)
+    # Handle wrap-around cases (e.g., 359 vs 1 degree)
+    return tf.reduce_mean(tf.minimum(diff, 360.0 - diff))
+
 model.compile(
-    loss='categorical_crossentropy',
+    loss=angle_loss,
     optimizer=optimizer,
-    metrics=[angle_error]
+    metrics=[angle_error_regression]
 )
 
-# 减小批量大小以提高泛化能力
+# 训练参数
 batch_size = 16
 nb_epoch = 100
 
-# 创建模型保存目录
+# 创建目录
 output_folder = 'models'
 if not os.path.exists(output_folder):
     os.makedirs(output_folder)
 
-# Add this: Create logs directory for TensorBoard
 log_dir = os.path.join('logs', model_name)
 if not os.path.exists(log_dir):
     os.makedirs(log_dir)
 
 # 配置回调函数
-monitor = 'val_angle_error'
+monitor = 'val_angle_error_regression'
 checkpointer = ModelCheckpoint(
     filepath=os.path.join(output_folder, model_name + '.keras'),
     monitor=monitor,
-    save_best_only=True
+    mode='min',
+    save_best_only=True,
+    verbose=1
 )
-reduce_lr = ReduceLROnPlateau(monitor=monitor, patience=3, mode='min')
-early_stopping = EarlyStopping(monitor=monitor, patience=5, mode='min')
+
+reduce_lr = ReduceLROnPlateau(
+    monitor=monitor,
+    factor=0.5,
+    patience=3,
+    min_lr=1e-6,
+    mode='min',
+    verbose=1
+)
+
+early_stopping = EarlyStopping(
+    monitor=monitor,
+    patience=10,
+    mode='min',
+    restore_best_weights=True,
+    verbose=1
+)
+
 tensorboard = TensorBoard(
     log_dir=log_dir,
     histogram_freq=1,
     write_graph=True,
-    write_images=True,
-    update_freq='batch',
-    profile_batch=0
+    update_freq='epoch'
 )
 
-# Create a custom callback to ensure metrics are logged properly
-class MetricsLogger(tf.keras.callbacks.Callback):
-    def on_epoch_end(self, epoch, logs=None):
-        logs = logs or {}
-        # Ensure angle error is logged with the correct name
-        if 'angle_error' in logs:
-            logs['angle_error'] = float(logs['angle_error'])
-        if 'val_angle_error' in logs:
-            logs['val_angle_error'] = float(logs['val_angle_error'])
+# 创建数据生成器 - 使用回归模式
+train_generator = RotNetDataGenerator(
+    train_filenames,
+    input_shape=input_shape,
+    batch_size=batch_size,
+    preprocess_func=preprocess_input,
+    crop_center=True,
+    crop_largest_rect=True,
+    shuffle=True,
+    one_hot=False  # 不使用one-hot编码，直接输出角度值
+)
 
-# Update the callbacks list to include the MetricsLogger
-callbacks = [
-    checkpointer,
-    reduce_lr,
-    early_stopping,
-    tensorboard,
-    MetricsLogger()
-]
+validation_generator = RotNetDataGenerator(
+    test_filenames,
+    input_shape=input_shape,
+    batch_size=batch_size,
+    preprocess_func=preprocess_input,
+    crop_center=True,
+    crop_largest_rect=True,
+    one_hot=False  # 不使用one-hot编码，直接输出角度值
+)
 
 # 开始训练
-model.fit(
-    RotNetDataGenerator(
-        train_filenames,
-        input_shape=input_shape,
-        batch_size=batch_size,
-        preprocess_func=preprocess_input,
-        crop_center=True,
-        crop_largest_rect=True,
-        shuffle=True
-    ),
+history = model.fit(
+    train_generator,
     steps_per_epoch=len(train_filenames) // batch_size,
     epochs=nb_epoch,
-    validation_data=RotNetDataGenerator(
-        test_filenames,
-        input_shape=input_shape,
-        batch_size=batch_size,
-        preprocess_func=preprocess_input,
-        crop_center=True,
-        crop_largest_rect=True
-    ),
+    validation_data=validation_generator,
     validation_steps=len(test_filenames) // batch_size,
-    callbacks=callbacks
-) 
+    callbacks=[checkpointer, reduce_lr, early_stopping, tensorboard],
+    workers=4,
+    use_multiprocessing=False
+)
+
+# 添加训练过程可视化
+plt.figure(figsize=(12, 4))
+
+# 绘制损失曲线
+plt.subplot(1, 2, 1)
+plt.plot(history.history['loss'], label='Training Loss')
+plt.plot(history.history['val_loss'], label='Validation Loss')
+plt.title('Model Loss')
+plt.xlabel('Epoch')
+plt.ylabel('Loss')
+plt.legend()
+
+# 绘制角度误差曲线
+plt.subplot(1, 2, 2)
+plt.plot(history.history['angle_error_regression'], label='Training Angle Error')
+plt.plot(history.history['val_angle_error_regression'], label='Validation Angle Error')
+plt.title('Model Angle Error')
+plt.xlabel('Epoch')
+plt.ylabel('Angle Error (degrees)')
+plt.legend()
+
+plt.tight_layout()
+plt.savefig('training_history.png')
+plt.close()
+ 
