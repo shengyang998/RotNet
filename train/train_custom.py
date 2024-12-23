@@ -18,6 +18,8 @@ import tensorflow as tf
 from concurrent.futures import ThreadPoolExecutor
 import threading
 
+import matplotlib.pyplot as plt
+
 # 添加项目根目录到Python路径
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils import angle_error_regression, RotNetDataGenerator
@@ -188,23 +190,28 @@ def denormalize_angle(normalized_angle):
     """Convert normalized angle [-1, 1] back to degrees [0, 360]"""
     return (normalized_angle + 1) * 180
 
+def normalize_angle(angle):
+    """Convert angle in degrees [0, 360] to normalized form [-1, 1]"""
+    return (angle / 180.0) - 1.0
+
 def angle_error_normalized(y_true, y_pred):
     """
     Calculate the angle error for normalized angles
-    Input angles are in normalized form [0, 1]
+    Input angles are in normalized form [-1, 1]
     Returns error in degrees
     """
+    # Cast inputs to float32
     y_true = tf.cast(y_true, tf.float32)
     y_pred = tf.cast(y_pred, tf.float32)
     
-    # Convert [0,1] to degrees [0,360]
-    y_true_angle = y_true * 360.0
-    y_pred_angle = y_pred * 360.0
+    # Convert normalized values back to angles [0, 360]
+    y_true_angle = denormalize_angle(y_true)
+    y_pred_angle = denormalize_angle(y_pred)
     
     # Calculate absolute difference
     diff = tf.abs(y_true_angle - y_pred_angle)
     # Handle cases where the difference is greater than 180 degrees
-    return tf.minimum(360.0 - diff, diff)
+    return tf.reduce_mean(tf.minimum(360.0 - diff, diff))
 
 model.compile(
     loss=angle_loss,
