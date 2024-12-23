@@ -78,7 +78,7 @@ def preprocess_image(image_path, max_width=4000, max_height=3000):
     # 创建处理后的图像目录
     os.makedirs(processed_dir, exist_ok=True)
     
-    # ���图像大小
+    # 图像大小
     resized = cv2.resize(img, (new_width, new_height), interpolation=cv2.INTER_AREA)
     
     # 保存处理后的像
@@ -219,9 +219,24 @@ model.compile(
     metrics=[angle_error_normalized]
 )
 
-# 训练参数
-batch_size = 16
+# 修改训练参数计算方式
+batch_size = 8
 nb_epoch = 100
+
+# 正确计算每个 epoch 的步数
+steps_per_epoch = len(train_filenames) // batch_size
+if len(train_filenames) % batch_size != 0:
+    steps_per_epoch += 1  # 如果有余数，添加一个额外的步骤来处理剩余数据
+
+validation_steps = len(test_filenames) // batch_size
+if len(test_filenames) % batch_size != 0:
+    validation_steps += 1
+
+print(f"Training samples: {len(train_filenames)}")
+print(f"Validation samples: {len(test_filenames)}")
+print(f"Batch size: {batch_size}")
+print(f"Steps per epoch: {steps_per_epoch}")
+print(f"Validation steps: {validation_steps}")
 
 # 创建目录
 output_folder = 'models'
@@ -326,7 +341,7 @@ callbacks = [
     LearningRateMonitor(log_dir)
 ]
 
-# 创建数据生成器 - 使用回归模���
+# 创建数据生成器 - 使用回归模型
 train_generator = RotNetDataGenerator(
     train_filenames,
     input_shape=input_shape,
@@ -335,7 +350,7 @@ train_generator = RotNetDataGenerator(
     crop_center=True,
     crop_largest_rect=True,
     shuffle=True,
-    one_hot=False  # 不使用one-hot编码，直接输出角度值
+    one_hot=False  # 使用回归模式
 )
 
 validation_generator = RotNetDataGenerator(
@@ -351,10 +366,10 @@ validation_generator = RotNetDataGenerator(
 # 开始训练
 history = model.fit(
     train_generator,
-    steps_per_epoch=len(train_filenames) // batch_size,
+    steps_per_epoch=steps_per_epoch,  # 使用修正后的步数
     epochs=nb_epoch,
     validation_data=validation_generator,
-    validation_steps=len(test_filenames) // batch_size,
+    validation_steps=validation_steps,  # 使用修正后的验证步数
     callbacks=callbacks
 )
 

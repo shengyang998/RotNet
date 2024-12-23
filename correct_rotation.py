@@ -34,7 +34,7 @@ def process_images(model, input_path, output_path,
             image_paths,
             input_shape=(224, 224, 3),
             batch_size=64,
-            one_hot=True,
+            one_hot=False,
             preprocess_func=preprocess_input,
             rotate=False,
             crop_largest_rect=True,
@@ -43,7 +43,7 @@ def process_images(model, input_path, output_path,
         val_samples=len(image_paths)
     )
 
-    predicted_angles = np.argmax(predictions, axis=1)
+    predicted_angles = predictions.flatten() * 360
 
     if output_path == '':
         output_path = '.'
