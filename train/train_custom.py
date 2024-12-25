@@ -20,10 +20,6 @@ import threading
 
 import matplotlib.pyplot as plt
 
-# 添加项目根目录到Python路径
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from utils import angle_error_regression, RotNetDataGenerator
-
 from tensorflow.keras import mixed_precision
 policy = mixed_precision.Policy('mixed_float16')
 mixed_precision.set_global_policy(policy)
@@ -33,7 +29,7 @@ print_lock = threading.Lock()
 
 # 添加项目根目录到Python路径
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from utils import angle_error, RotNetDataGenerator
+from utils import RotNetDataGenerator
 
 import tensorflow as tf
 

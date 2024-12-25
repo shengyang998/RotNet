@@ -330,7 +330,8 @@ class RotNetDataGenerator(Iterator):
             # convert the numerical labels to binary labels
             batch_y = to_categorical(batch_y, 36000)
         else:
-            batch_y /= 36000
+            # Convert from [0, 36000] to [-1, 1]
+            batch_y = (batch_y / 18000.0) - 1.0
 
         # preprocess input images
         if self.preprocess_func:
