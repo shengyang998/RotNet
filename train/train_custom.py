@@ -132,34 +132,61 @@ model_name = 'rotnet_custom_resnet50_regression'
 # 修改模型配置参数 - 回归模型只需要预测一个角度值
 input_shape = (224, 224, 3)
 
-# 加载预训练的ResNet50模型
-base_model = ResNet50(weights='imagenet', 
-                     include_top=False,
-                     input_shape=input_shape,
-                     pooling='avg')
+# 加载预训练的ResNet50模型，但使用更小的输入尺寸以减少内存使用
+base_model = ResNet50(
+    weights='imagenet', 
+    include_top=False,
+    input_shape=input_shape,
+    pooling=None  # 移除全局池化，使用自定义的特征提取
+)
 
-# 冻结部分层
-for layer in base_model.layers[:-20]:
+# 冻结部分基础模型层
+for layer in base_model.layers[:-50]:  # 只训练最后50层
     layer.trainable = False
 
-# 简化回归模型结构
+# 构建更适合角度回归的模型结构
 x = base_model.output
-x = Dense(1024, activation='relu', kernel_regularizer=tf.keras.regularizers.l2(0.001))(x)
-x = tf.keras.layers.BatchNormalization()(x)
-x = tf.keras.layers.Dropout(0.3)(x)
-x = Dense(512, activation='relu', kernel_regularizer=tf.keras.regularizers.l2(0.001))(x)
-x = tf.keras.layers.BatchNormalization()(x)
-x = tf.keras.layers.Dropout(0.3)(x)
-# 最后一层使用线性激活函数，直接输出角度值
-final_output = Dense(1, activation='tanh', name='angle_output')(x)
 
-# 创建完整模型
+# 空��特征处理
+x = tf.keras.layers.Conv2D(512, (3, 3), padding='same', activation='relu')(x)
+x = tf.keras.layers.BatchNormalization()(x)
+x = tf.keras.layers.MaxPooling2D((2, 2))(x)
+
+# 添加注意力机制
+attention = tf.keras.layers.Conv2D(512, (1, 1), padding='same', activation='sigmoid')(x)
+x = tf.keras.layers.Multiply()([x, attention])
+
+# 特征聚合
+x = tf.keras.layers.GlobalAveragePooling2D()(x)
+
+# 全连接层，逐步降维
+x = tf.keras.layers.Dense(1024, kernel_regularizer=tf.keras.regularizers.l2(0.001))(x)
+x = tf.keras.layers.LeakyReLU(alpha=0.1)(x)
+x = tf.keras.layers.BatchNormalization()(x)
+x = tf.keras.layers.Dropout(0.4)(x)
+
+x = tf.keras.layers.Dense(512, kernel_regularizer=tf.keras.regularizers.l2(0.001))(x)
+x = tf.keras.layers.LeakyReLU(alpha=0.1)(x)
+x = tf.keras.layers.BatchNormalization()(x)
+x = tf.keras.layers.Dropout(0.3)(x)
+
+x = tf.keras.layers.Dense(256, kernel_regularizer=tf.keras.regularizers.l2(0.001))(x)
+x = tf.keras.layers.LeakyReLU(alpha=0.1)(x)
+x = tf.keras.layers.BatchNormalization()(x)
+x = tf.keras.layers.Dropout(0.2)(x)
+
+# 角度预测层
+# 使用 tanh 激活函数确保输出在 [-1, 1] 范围内
+final_output = tf.keras.layers.Dense(1, activation='tanh', name='angle_output')(x)
+
+# 创建模型
 model = Model(inputs=base_model.input, outputs=final_output)
 
-# 使用Adam优化器
-optimizer = Adam(
+# 使用 AdamW 优化器，它具���更好的权重衰减特性
+optimizer = tf.keras.optimizers.AdamW(
     learning_rate=1e-4,
-    clipnorm=1.0  # Add gradient clipping
+    weight_decay=1e-5,
+    clipnorm=1.0  # 添加梯度裁剪
 )
 
 # 配置模型训练参数 - 使用MSE或自定义损失函数
@@ -180,11 +207,12 @@ def angle_loss(y_true, y_pred):
     y_true_rad = y_true_angle * np.pi / 180.0
     y_pred_rad = y_pred_angle * np.pi / 180.0
     
-    # Calculate the difference using sine and cosine to handle periodicity
-    diff_sin = tf.sin(y_true_rad) - tf.sin(y_pred_rad)
-    diff_cos = tf.cos(y_true_rad) - tf.cos(y_pred_rad)
+    # Use periodic loss based on sine and cosine
+    loss = tf.reduce_mean(
+        1.0 - tf.cos((y_true_rad - y_pred_rad))
+    )
     
-    return tf.reduce_mean(diff_sin**2 + diff_cos**2)
+    return loss
 
 def denormalize_angle(normalized_angle):
     """Convert normalized angle [-1, 1] back to degrees [0, 360]"""
@@ -210,8 +238,12 @@ def angle_error_normalized(y_true, y_pred):
     
     # Calculate absolute difference
     diff = tf.abs(y_true_angle - y_pred_angle)
-    # Handle cases where the difference is greater than 180 degrees
-    return tf.reduce_mean(tf.minimum(360.0 - diff, diff))
+    min_diff = tf.minimum(360.0 - diff, diff)
+    
+    # 计算平均误差
+    mean_error = tf.reduce_mean(min_diff)
+    
+    return mean_error
 
 model.compile(
     loss=angle_loss,
@@ -219,8 +251,11 @@ model.compile(
     metrics=[angle_error_normalized]
 )
 
-# 修改训练参数计算方式
-batch_size = 8
+# 打印模型结构
+model.summary()
+
+# 修改训练参数
+batch_size = 16  # 增加批量大小
 nb_epoch = 100
 
 # 正确计算每个 epoch 的步数
@@ -316,8 +351,8 @@ checkpointer = ModelCheckpoint(
 )
 
 reduce_lr = ReduceLROnPlateau(
-    monitor=monitor,
-    factor=0.2,  # Smaller factor for smoother lr reduction
+    monitor='val_angle_error_normalized',
+    factor=0.2,
     patience=5,
     min_lr=1e-6,
     mode='min',
@@ -332,16 +367,7 @@ early_stopping = EarlyStopping(
     verbose=1
 )
 
-# 更新 callbacks 列表，传入 log_dir 到 LearningRateMonitor
-callbacks = [
-    checkpointer,
-    reduce_lr,
-    early_stopping,
-    tensorboard,
-    LearningRateMonitor(log_dir)
-]
-
-# 创建数据生成器 - 使用回归模型
+# 首先创建数据生成器
 train_generator = RotNetDataGenerator(
     train_filenames,
     input_shape=input_shape,
@@ -350,7 +376,7 @@ train_generator = RotNetDataGenerator(
     crop_center=True,
     crop_largest_rect=True,
     shuffle=True,
-    one_hot=False  # 使用回归模式
+    one_hot=False  # 使用回归式
 )
 
 validation_generator = RotNetDataGenerator(
@@ -363,13 +389,51 @@ validation_generator = RotNetDataGenerator(
     one_hot=False  # 不使用one-hot编码，直接输出角度值
 )
 
+# 修改调试回调
+class DebugCallback(tf.keras.callbacks.Callback):
+    def on_epoch_end(self, epoch, logs=None):
+        # 获取一个批次的验证数据
+        x_val, y_true = next(iter(validation_generator))
+        y_pred = self.model.predict(x_val, verbose=0)
+        
+        # 转换为角度
+        y_true = tf.cast(y_true, tf.float32)
+        y_pred = tf.cast(y_pred, tf.float32)
+        y_true_angle = denormalize_angle(y_true)
+        y_pred_angle = denormalize_angle(y_pred)
+        
+        # 打印一些样本
+        print("\nEpoch {} Debug Info:".format(epoch))
+        for i in range(min(5, len(y_true))):
+            # 使用 .numpy() 转换为标量值再格式化
+            true_val = float(y_true_angle[i].numpy())
+            pred_val = float(y_pred_angle[i].numpy())
+            print(f"True: {true_val:.1f}° Pred: {pred_val:.1f}°")
+            
+        # 计算并打印平均误差
+        diff = tf.abs(y_true_angle - y_pred_angle)
+        min_diff = tf.minimum(360.0 - diff, diff)
+        mean_error = float(tf.reduce_mean(min_diff).numpy())
+        print(f"Mean angle error: {mean_error:.2f}°")
+        print(f"Current loss: {logs.get('loss', 'N/A')}")
+
+# 创建其他回调函数
+callbacks = [
+    checkpointer,
+    reduce_lr,
+    early_stopping,
+    tensorboard,
+    LearningRateMonitor(log_dir),
+    DebugCallback()
+]
+
 # 开始训练
 history = model.fit(
     train_generator,
-    steps_per_epoch=steps_per_epoch,  # 使用修正后的步数
+    steps_per_epoch=steps_per_epoch,
     epochs=nb_epoch,
     validation_data=validation_generator,
-    validation_steps=validation_steps,  # 使用修正后的验证步数
+    validation_steps=validation_steps,
     callbacks=callbacks
 )
 
@@ -413,4 +477,3 @@ plt.legend()
 plt.tight_layout()
 plt.savefig('training_history.png')
 plt.close()
- 
